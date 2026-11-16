@@ -110,3 +110,4 @@ ehthumbs.db
 .vscode/
 *.sublime-project
 *.sublime-workspace
+report/*

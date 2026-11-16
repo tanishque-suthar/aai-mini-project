@@ -12,9 +12,9 @@ flowchart TD
     DA -->|"Conditional Edge (should_continue)"| SA["Spending Analysis Agent<br/>(Aggregates, Z-Score Outliers, Recurrences, Health Score)"]
     SA --> CF["Cash-Flow Forecast Agent<br/>(90-Day Simulation & Liquidity Stress Test)"]
     CF --> ADV["Financial Advisor Agent<br/>(Strategic Synthesis, Quantified Savings & Action Plan)"]
-    ADV --> DB[("SQLite Storage<br/>(Reports, Categorized Txns, Preferences)")]
+    ADV --> DB[("SQLite Storage<br/>(analysis_reports, transactions, user_preferences)")]
     DB --> API["FastAPI REST Endpoints"]
-    API --> UI["React Interactive Dashboard"]
+    API --> UI["React Interactive Dashboard (6 Views)"]
     UI -->|"Interactive Inquiries"| CHAT["Advisor Conversational Q&A Engine"]
 ```
 
@@ -46,7 +46,7 @@ class AgentState(TypedDict, total=False):
     spending_analysis: Dict[str, Any]
     forecast: Dict[str, Any]
     advisory_report: Dict[str, Any]
-    agent_traces: List[Dict[str, Any]]  # Execution traces, reasoning logs & decisions
+    agent_traces: List[Dict[str, Any]]  # Execution traces, reasoning logs & decisions for each node
     chat_query: Optional[str]
     chat_response: Optional[str]
     errors: List[str]
@@ -113,10 +113,10 @@ graph LR
    - Assigns a classification confidence score:
      - Exact merchant regex match: Confidence $\ge 0.95$.
      - Credit transactions identified as salary/dividends: Confidence $\ge 0.99$.
-     - Unmatched descriptions default to `"Other Expenses"` with a lower confidence of $0.60$.
+     - Unmatched descriptions default to `"Other Expenses"` with a baseline confidence of $0.60$.
 3. **Ambiguity Handling & Observability Call**:
    - When confidence drops below $0.65$, transactions are flagged as ambiguous.
-   - The agent invokes an LLM classification prompt via [smart_llm_call](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/backend/app/llm.py) to evaluate the merchant name, logging the token usage and latency into the agent trace.
+   - The agent invokes an LLM classification prompt via [smart_llm_call](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/backend/app/llm.py) with task `"classification"` to evaluate the merchant name, logging token usage and latency into the agent trace.
 
 ---
 
@@ -135,14 +135,14 @@ $$\Delta = \text{Expense}_{\text{curr}} - \text{Expense}_{\text{prev}}$$
 $$\% \Delta = \left(\frac{\Delta}{\text{Expense}_{\text{prev}}}\right) \times 100$$
 
 #### 2. Statistical Anomaly & Duplicate Detection
-The agent uses two complementary strategies to identify anomalous charges:
+The agent uses three complementary strategies to identify anomalous charges:
 - **Z-Score Outlier Analysis**: For each spending category, it calculates the sample mean ($\mu$) and standard deviation ($\sigma$). A transaction is flagged if its Z-score exceeds the threshold ($Z \ge 2.2$) and the absolute amount is notable ($> ₹3,000$):
   $$Z = \frac{x - \mu}{\sigma}$$
 - **Duplicate Charge Detection**: The agent hashes transaction tuples `(date, normalized_description, amount)`. Identical debits occurring on the same date are flagged as potential duplicate charges.
 - **Absolute Magnitude Threshold**: Single non-investment/non-utility expenditures exceeding ₹18,000 are flagged for user review.
 
 #### 3. Recurrence & Subscription Cadence Detection
-To identify recurring obligations without relying on merchant whitelists, the agent clusters debits by merchant narration:
+To identify recurring obligations without relying on rigid merchant whitelists, the agent clusters debits by merchant narration:
 - If a merchant appears $\ge 2$ times across the dataset.
 - The amount exhibits minimal variance ($|\text{amount} - \text{mean}| \le 0.05 \times \text{mean}$).
 - The agent classifies the obligation as `Monthly Recurring`, calculating the total committed outflow per month.
@@ -158,6 +158,9 @@ The agent calculates a transparent, deterministic health score across four pilla
 | **Wealth & Coverage** | 20 pts | Investment ratio vs total income: $\ge 15\% \rightarrow 20$ pts; $\ge 10\% \rightarrow 16$ pts; else 8 pts |
 
 Ratings are graded as: **Excellent** ($\ge 80$), **Good** ($\ge 65$), **Moderate** ($\ge 50$), or **Needs Attention** ($< 50$).
+
+#### 5. Executive Anomaly Commentary
+When anomalies or budget breaches are detected, the agent dispatches an LLM task (`"anomaly_commentary"`) to summarize risks in an executive 1–2 sentence format for user presentation.
 
 ---
 
@@ -177,7 +180,7 @@ Ratings are graded as: **Excellent** ($\ge 80$), **Good** ($\ge 65$), **Moderate
 3. **Liquidity Stress Testing**:
    At each day $t \in [1, 90]$, projected balance $B(t)$ is checked against the user's safety reserve threshold ($\text{Floor}_{\text{min}}$, default ₹15,000):
    $$B(t) < \text{Floor}_{\text{min}} \implies \text{Trigger Shortfall Warning}$$
-   The agent records the exact date of breach and provides milestones at Day 30, Day 60, and Day 90.
+   The agent records the exact date of breach and provides milestone balances at Day 30, Day 60, and Day 90.
 
 ---
 
@@ -196,9 +199,7 @@ The advisor inspects findings across all upstream agents and formulates prioriti
 - **Savings Rate Expansion**: Compares actual savings against the 25% target benchmark and recommends automated SIP transfers.
 
 #### 2. Conversational Q&A Engine (`chat_advisor_response`)
-Users can chat with the Financial Advisor via the dashboard. The system injects a comprehensive snapshot of the user's financial state (total income, expenses, category utilization, detected anomalies, recurring commitments, and 90-day balance projections) into the LLM system prompt. 
-
-If the user queries about reasons for spending increases, subscription lists, or cash flow safety, the response is grounded strictly in the calculated facts.
+Users can chat with the Financial Advisor via the dashboard. The system injects a comprehensive snapshot of the user's financial state (total income, expenses, category utilization, detected anomalies, recurring commitments, and 90-day balance projections) into the LLM system prompt.
 
 ```mermaid
 sequenceDiagram
@@ -271,17 +272,22 @@ def build_finance_agent_graph():
 The system handles LLM integrations through [backend/app/llm.py](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/backend/app/llm.py).
 
 ### 4.1 Supported Providers
-1. **Groq**: Uses `llama-3.3-70b-versatile` via the OpenAI-compatible SDK endpoint for low-latency JSON classification and commentary.
-2. **Google Gemini**: Uses `gemini-2.0-flash` for multi-factor strategic reasoning and conversational Q&A.
+1. **Groq**: Configured using OpenAI-compatible SDK pointing to `https://api.groq.com/openai/v1`. Default model: `llama-3.3-70b-versatile`. Powers fast classification and anomaly commentary.
+2. **Google Gemini**: Configured using OpenAI-compatible SDK endpoint pointing to `https://generativelanguage.googleapis.com/v1beta/openai/`. Default models: `gemini-2.0-flash` / `gemini-1.5-flash`. Powers strategic advisory synthesis and conversational copilot chat.
 
-### 4.2 Graceful Degradation & Offline Capability
-A critical requirement in financial software is reliability. The application must not crash if an API key expires, an external endpoint times out, or the system runs offline.
+### 4.2 Four Dedicated LLM Task Routes
+The helper `smart_llm_call(task_name, system_prompt, user_prompt, fallback_func)` dispatches four targeted operations:
+1. `"classification"`: In `data_agent`, evaluates ambiguous transaction narrations with low regex confidence.
+2. `"anomaly_commentary"`: In `analysis_agent`, generates an executive risk analyst overview of detected outliers.
+3. `"advisory_synthesis"`: In `advisor_agent`, synthesizes verified state metrics into prioritized recommendations.
+4. `"chat"`: In `chat_advisor_response`, generates grounded conversational answers to user inquiries.
 
-To guarantee zero downtime, `smart_llm_call`:
-1. Attempts to execute via the primary LLM provider.
-2. If the primary fails or is not configured, attempts the secondary provider.
-3. If both providers fail or keys are absent, executes a deterministic fallback function (calculating recommendations or generating pattern-matched chat responses).
-4. Records the exact status (`success`, `skipped_no_key`, or `error`) inside the agent's observability trace.
+### 4.3 Graceful Degradation & Zero-Key Simulation
+Financial software must maintain strict reliability regardless of external cloud outages:
+1. Tries the primary designated LLM provider.
+2. If the primary fails, times out, or has no key, cascades to the secondary provider.
+3. If no LLM keys are configured, executes deterministic domain heuristics (pattern matching, mathematical calculations, rule-based responses).
+4. Records the exact outcome (`success`, `skipped_no_key`, or `error`) inside the agent's observability trace.
 
 ---
 
@@ -289,23 +295,47 @@ To guarantee zero downtime, `smart_llm_call`:
 
 ### 5.1 Backend Architecture (FastAPI & SQLite)
 - **FastAPI Endpoints** ([main.py](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/backend/app/main.py)):
-  - `POST /api/upload`: Validates CSV structure, invokes `run_finance_pipeline`, and persists results to SQLite.
+  - `GET /api/health`: Health status and service metadata.
+  - `GET /api/config/llm`: Live configuration status of Groq and Gemini integrations.
+  - `GET /api/reports/latest`: Retrieves the latest report with all agent execution traces.
+  - `GET /api/reports/{report_id}`: Retrieves a historical analysis report by unique ID.
+  - `POST /api/upload`: Ingests a user CSV file, runs the multi-agent pipeline, and persists the outputs.
   - `POST /api/analyze-sample`: Loads built-in 3-month demo transactions (46 records) to instantly populate the agent pipeline.
-  - `GET /api/reports/latest`: Retrieves the most recent execution report, including all agent traces.
-  - `GET /api/transactions`: Provides a filterable, paginated register of normalized transactions.
-  - `POST /api/chat`: Routes natural language questions to the Financial Advisor Agent.
-  - `POST /api/preferences`: Updates category budgets and minimum balance thresholds, automatically triggering pipeline re-analysis.
+  - `GET /api/transactions`: Filterable, paginated register of normalized transactions (by category, merchant, amount).
+  - `POST /api/chat`: Routes conversational questions to the Financial Advisor Agent.
+  - `GET /api/preferences`: Retrieves active category budgets and safety balance thresholds.
+  - `POST /api/preferences`: Updates category budgets and liquidity thresholds, automatically triggering pipeline re-analysis.
 - **Persistence** ([database.py](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/backend/app/database.py)):
-  - Uses SQLite (`data/finance_agent.db`) with schemas for `reports`, `transactions`, and `user_preferences`. JSON state payloads are serialized for instant reload across sessions.
+  - SQLite database stored at `data/finance_agent.db`.
+  - Tables:
+    - `analysis_reports`: Stores report ID, timestamp, filename, and full JSON state snapshot.
+    - `transactions`: Stores individual categorized records with anomaly and recurring flags.
+    - `user_preferences`: Stores user-configured category spending budgets and liquidity thresholds.
 
 ### 5.2 Frontend Architecture (React 18 & Vite)
 The user interface is an interactive Single Page Application located in [frontend/src/](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/):
-- **Agent Traces Inspector** ([AgentTracesView.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/AgentTracesView.jsx)): Provides a visual inspector where users can review node latency, reasoning steps, state mutations, and raw LLM prompts.
-- **Financial Health Scorecard** ([FinancialHealthCard.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/FinancialHealthCard.jsx)): Displays a color-coded gauge with transparent component breakdowns (Savings Rate, Budget Adherence, Spending Stability, and Wealth Allocation).
-- **Interactive Budget Tracker** ([BudgetTracker.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/BudgetTracker.jsx)): Allows real-time modification of spending thresholds per category.
-- **Cash Flow Horizon** ([ForecastView.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/ForecastView.jsx)): Recharts-powered projection tracking Day 30, 60, and 90 milestones against safety thresholds.
-- **Anomalies & Recurring Obligations** ([AnomalyAlerts.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/AnomalyAlerts.jsx)): Highlights statistical outliers and recurring monthly commitments.
-- **Conversational Advisor** ([AdvisorChat.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/AdvisorChat.jsx)): Chat window with prompt shortcuts for real-time natural language inquiries.
+
+#### Component Roster
+- [Header.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/Header.jsx): Branding, real-time agent status capsule, LLM provider routing badge, Demo Scenario trigger, and Upload CSV trigger.
+- [FileUpload.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/FileUpload.jsx): Active dataset status bar, transaction counter, and file input handler.
+- [SummaryCards.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/SummaryCards.jsx): Primary financial KPIs (Total Income, Total Expenses, Net Savings, Recurring outflow).
+- [FinancialHealthCard.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/FinancialHealthCard.jsx): Transparent 0–100 health gauge broken down across Savings Rate, Budget Adherence, Spending Stability, and Wealth Allocation.
+- [ChartsView.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/ChartsView.jsx): Category expenditure donut chart and month-by-month cash flow trend bar chart.
+- [Recommendations.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/Recommendations.jsx): Prioritized actionable advisory cards with quantified monthly and annual ₹ savings.
+- [BudgetTracker.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/BudgetTracker.jsx): Category budget sliders with real-time budget utilization bars and threshold modification.
+- [ForecastView.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/ForecastView.jsx): Recharts-powered 90-day daily balance simulation tracking Day 30, 60, and 90 milestones against safety reserve thresholds.
+- [AdvisorChat.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/AdvisorChat.jsx): Conversational AI copilot with pre-populated prompt shortcuts for quick queries.
+- [AnomalyAlerts.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/AnomalyAlerts.jsx): Tabs for statistical Z-score anomalies / duplicate charges and detected recurring monthly subscriptions.
+- [TransactionsTable.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/TransactionsTable.jsx): Searchable and category-filterable table of all normalized records with confidence indicators.
+- [AgentTracesView.jsx](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/frontend/src/components/AgentTracesView.jsx): Live glass-box multi-agent observability inspector displaying execution latency, reasoning steps, state transitions, and raw LLM metadata.
+
+#### Dashboard Navigation Tabs
+1. **Overview**: Executive summary, health card, charts, and recommendations.
+2. **Budgets & Forecast**: Budget limits and 90-day balance trajectories.
+3. **AI Advisor**: Interactive conversational advisor chat.
+4. **Risk & Obligations**: Statistical outliers and recurring commitments.
+5. **Transactions**: Normalized transaction register.
+6. **Agent Traces**: Glass-box agent execution traces.
 
 ---
 
@@ -315,13 +345,14 @@ The repository contains an automated test suite verifying both agent logic and f
 
 ### 6.1 Unit & Agent Integration Tests (Pytest)
 Located in [tests/test_backend.py](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/tests/test_backend.py):
-- Tests merchant classification rules and confidence calculations.
+- Tests merchant classification rules and confidence calculations across categories.
 - Exercises the end-to-end multi-agent LangGraph workflow against sample transaction data.
 - Validates mathematical relationships:
   - $\text{Total Income} - \text{Total Expenses} = \text{Net Savings}$
   - Savings rate formula consistency.
   - Z-score outlier generation and recurrence clustering.
   - Advisory savings tally arithmetic.
+- Tests REST API endpoints: `/api/health`, `/api/config/llm`, `/api/analyze-sample`, `/api/reports/latest`, `/api/transactions`, `/api/chat`.
 
 To run:
 ```bash
@@ -330,8 +361,8 @@ PYTHONPATH=. backend/venv/bin/pytest tests/test_backend.py
 
 ### 6.2 End-to-End Browser Testing (Playwright)
 Located in [tests/test_frontend_playwright.py](file:///mnt/ubuntuExtended/projects/1COLLEGE/aai-minip/tests/test_frontend_playwright.py):
-- Launches the Vite dev server and FastAPI backend.
-- Simulates user interaction: loading sample data, inspecting charts, opening the Agent Traces view, toggling budget preferences, and chatting with the Advisor.
+- Launches headless browser tests against the running application.
+- Exercises navigation across all 6 tabs, testing the budget tracker, cash flow forecast, advisor chat queries, transaction search filters, and agent trace inspection panels.
 
 ---
 
